@@ -8,38 +8,73 @@ on:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 35   # 整个 job 最长 35 分钟
+    timeout-minutes: 35
+
     steps:
-      - name: GET two URLs with status logs
+      - name: GET two URLs with status & timing
+        id: ping_step
         env:
           URL1: ${{ secrets.PING_URL1 }}
           URL2: ${{ secrets.PING_URL2 }}
         run: |
           set -euo pipefail
           failures=0
+          : > report.txt
 
-          hit() {
+          hit () {
             local url="$1"
             echo "==> Hitting: $url"
-            code=$(curl -sS -o /dev/null -w "%{http_code}" \
-              --retry 1 --max-time 1800 \
-              -H 'Cache-Control: no-cache' \
-              -A 'GH-Actions-Pinger/1.0' \
-              "$url" || echo "000")
-            echo "HTTP $code"
+
+            read -r code t_dns t_tcp t_tls t_ttfb t_total < <(
+              curl -sS -o /dev/null \
+                   -w "%{http_code} %{time_namelookup} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total}\n" \
+                   --retry 1 --max-time 1800 \
+                   -H 'Cache-Control: no-cache' \
+                   -A 'GH-Actions-Pinger/1.0' \
+                   "$url" || echo "000 0 0 0 0 0"
+            )
+
+            echo "HTTP $code | total=${t_total}s ttfb=${t_ttfb}s"
+            {
+              echo "URL: $url"
+              echo "HTTP: $code"
+              echo "Timing(s): dns=${t_dns} tcp=${t_tcp} tls=${t_tls} ttfb=${t_ttfb} total=${t_total}"
+              echo
+            } >> report.txt
+
             if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
-              echo "!! Request failed for $url"
               failures=$((failures+1))
             fi
-            echo
           }
 
           hit "$URL1"
           hit "$URL2"
 
           if [ "$failures" -gt 0 ]; then
-            echo "There were $failures failed request(s)."
             exit 1
-          else
-            echo "All requests succeeded."
           fi
+
+      - name: Server酱通知（仅失败时）
+        if: failure()
+        env:
+          SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+        run: |
+          set -euo pipefail
+
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TITLE="❌ 每日任务失败：${{ github.workflow }}"
+
+          # 用文件拼装正文，避免 YAML/引号/换行问题
+          {
+            echo "请求失败"
+            echo "仓库: ${{ github.repository }}"
+            echo "分支: ${{ github.ref_name }}"
+            echo "提交: ${{ github.sha }}"
+            echo "日志: ${RUN_URL}"
+            echo
+            cat report.txt 2>/dev/null || true
+          } > message.txt
+
+          curl -sS "https://sctapi.ftqq.com/${SENDKEY}.send" \
+            --data-urlencode "title=${TITLE}" \
+            --data-urlencode "desp=$(cat message.txt)"
