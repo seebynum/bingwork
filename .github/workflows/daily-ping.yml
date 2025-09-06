@@ -1,0 +1,42 @@
+name: Daily URL GET (01:00 Beijing Time)
+
+on:
+  schedule:
+    - cron: "0 17 * * *"   # GitHub 使用 UTC；17:00 UTC = 北京时间 01:00
+  workflow_dispatch:        # 允许手动触发测试
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET two URLs with status logs
+        env:
+          URL1: ${{ secrets.PING_URL1 }}
+          URL2: ${{ secrets.PING_URL2 }}
+        run: |
+          set -euo pipefail
+          failures=0
+
+          hit() {
+            local url="$1"
+            echo "==> Hitting: $url"
+            # -s 静默 -S 失败时显示 -o 丢弃响应体 -w 仅输出状态码
+            code=$(curl -sS -o /dev/null -w "%{http_code}" --retry 3 --max-time 20 \
+              -H 'Cache-Control: no-cache' -A 'GH-Actions-Pinger/1.0' "$url" || echo "000")
+            echo "HTTP $code"
+            if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
+              echo "!! Request failed for $url"
+              failures=$((failures+1))
+            fi
+            echo
+          }
+
+          hit "$URL1"
+          hit "$URL2"
+
+          if [ "$failures" -gt 0 ]; then
+            echo "There were $failures failed request(s)."
+            exit 1
+          else
+            echo "All requests succeeded."
+          fi
